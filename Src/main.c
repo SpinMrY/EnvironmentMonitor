@@ -52,6 +52,7 @@
 #include "main.h"
 #include "fatfs.h"
 
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -116,6 +117,44 @@ void PrintTime();
 /* Private user code ---------------------------------------------------------*/
 
 /* USER CODE BEGIN 0 */
+uint8_t fac_us;
+
+void delay_init(uint8_t SYSCLK){
+	#if SYSTEM_SUPPORT_OS
+		uint32_t reload;
+	#endif
+    
+	HAL_SYSTICK_CLKSourceConfig(SYSTICK_CLKSOURCE_HCLK);
+	fac_us=SYSCLK;
+    
+	#if SYSTEM_SUPPORT_OS
+		reload=SYSCLK; 
+		reload*=1000000/delay_ostickspersec; 
+		fac_ms=1000/delay_ostickspersec;
+		SysTick->CTRL|=SysTick_CTRL_TICKINT_Msk;
+		SysTick->LOAD=reload;
+		SysTick->CTRL|=SysTick_CTRL_ENABLE_Msk;
+	#else
+	#endif
+}
+
+void delay_us(uint32_t nus){
+	uint32_t ticks;
+	uint32_t told,tnow,tcnt=0;
+	uint32_t reload=SysTick->LOAD; 
+	ticks=nus*fac_us; 
+	told=SysTick->VAL; 
+	while(1) {
+		tnow=SysTick->VAL;
+		if(tnow!=told) {
+			if(tnow<told)tcnt+=told-tnow;
+			else tcnt+=reload-tnow+told;
+			told=tnow;
+			if(tcnt>=ticks)break; 
+		}
+	};
+}
+
 RTC_DateTypeDef sDate;
 RTC_TimeTypeDef sTime;
 uint8_t second_tmp = 0;
@@ -130,13 +169,103 @@ uint8_t PMSensorBuffer[128];
 uint8_t PMSensor[17];
 int TOT = 0, PMSensorLen;
 
-//PM Sensor
+//DHT22/AM2303 Sensor
+
+uint8_t Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2;
+uint16_t sum, RH, TEMP;
+int temp_low, temp_high, rh_low, rh_high;
+char temp_char1[2], temp_char2, rh_char1[2], rh_char2;
+uint8_t check = 0;
+GPIO_InitTypeDef GPIO_InitStruct;
+
+void set_gpio_output(void){
+	
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	
+}
+
+void set_gpio_input(void){
+
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	
+}
+
+
+void DHT22_start(void){
+	
+	set_gpio_output(); 
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, 0); 
+	delay_us (500);   
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, 1);  
+	delay_us(30);
+	set_gpio_input();
+	
+}
+
+void check_response (void){
+	
+	delay_us(40);
+	if(!(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1))){
+		delay_us (80);
+		if((HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_1)))check = 1;
+	}
+	while((HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_1)));
+	
+}
+
+uint8_t read_data (void){
+
+	uint8_t i = 0,j;
+	for (j=0; j<8; j++) {
+		while (!(HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_1))); 
+		delay_us (40); 
+		if ((HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_1)) == 0)  {
+			i &= ~(1 << (7 - j) ); 
+		}
+		else i |= (1 << (7 - j) ); 
+		while ((HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_1)));  
+	}
+	return i;
+}
+
+void UpdateTemp(void){
+	
+	DHT22_start ();
+	check_response ();
+	Rh_byte1 = read_data ();
+	Rh_byte2 = read_data ();
+	Temp_byte1 = read_data ();
+	Temp_byte2 = read_data ();
+	sum = read_data();
+	//if (sum == (Rh_byte1+Rh_byte2+Temp_byte1+Temp_byte2))
+	//{
+	TEMP = ((Temp_byte1<<8)|Temp_byte2);
+	RH = ((Rh_byte1<<8)|Rh_byte2);
+	//}
+	HAL_Delay(500);
+	temp_low = TEMP/10;
+	temp_high = TEMP%10;
+	
+	rh_low = RH/10;
+	rh_high = RH%10;
+	PrintTime();
+	printf("[DHT22_STATE] Success!\n");
+	
+	return ;
+}
+
 
 struct PMSensor{
 	int PM1_0_CF, PM2_5_CF, PM10_CF, PM1_0, PM2_5, PM10;
 }PMResult;
 
-void ListenPMSensor(){
+void ListenPMSensor(void){
 	memset(PMSensorBuffer, 0, sizeof(PMSensorBuffer));
 	memset(PMSensor, 0, sizeof(PMSensor));
 	
@@ -181,9 +310,11 @@ void GetPMSensor(void){
 		PMResult.PM10 	= (uint16_t)((PMSensor[14]<<8) | PMSensor[15]);
 		
 	}
+	return ;
+
 }
 
-int CheckPMSensor(){
+int CheckPMSensor(void){
 	
 	uint16_t 	Cal_CheckSum;
 	uint16_t 	Buffer_CheckSum;
@@ -215,7 +346,7 @@ uint8_t CO2Sensor[12];
 
 int CO2SensorLen = 0, CO2SensorResult = 0;
 
-void ListenCO2Sensor(){
+void ListenCO2Sensor(void){
 	memset(CO2SensorBuffer, 0, sizeof(CO2SensorBuffer));
 	memset(CO2Sensor, 0, sizeof(CO2Sensor));
 	
@@ -240,7 +371,7 @@ void ListenCO2Sensor(){
 }
 
 
-int CheckCO2Sensor(){
+int CheckCO2Sensor(void){
 	
 	uint16_t 	Cal_CheckSum;
 	uint16_t 	Buffer_CheckSum;
@@ -266,7 +397,7 @@ int CheckCO2Sensor(){
 	return Result;
 }
 
-void GetCO2Sensor(){
+void GetCO2Sensor(void){
 	CO2SensorResult = (uint16_t)((CO2Sensor[4]<<8) | CO2Sensor[5]);
 	return ;
 }
@@ -274,7 +405,7 @@ void GetCO2Sensor(){
 FATFS SDFatFs;
 FIL MyFile;
 
-void WriteFile(){
+void WriteFile(void){
 	
 	LED0_off();
 	LED1_off();
@@ -290,20 +421,26 @@ void WriteFile(){
 				sTime.Seconds
 	);
 	char wtext[150] = " ";
-	sprintf(wtext, "%sCO2 : _%04d_ ppm\nPM2.5 : _%04d_ ug/m3\nPM10 : _%04d_ ug/m3\n", 
+	sprintf(wtext, "%sTemp : _%d.%d_ degree Celsius\nRH : _%d.%d_  %% \nCO2 : _%04d_ ppm\nPM2.5 : _%04d_ ug/m3\nPM10 : _%04d_ ug/m3\n", 
 		nowdate,
+		temp_low,
+		temp_high,
+		rh_low,
+		rh_high,
 		CO2SensorResult, 
 		PMResult.PM2_5, 
 		PMResult.PM10
 	);
-	char FileName[25] = " ";
-	sprintf(FileName, "Sensor_%02d%02d%02d%02d%02d_.txt", 
+	char FileName[50] = " ";
+	
+	sprintf(FileName, "Sensor_20%02d-%02d-%02d-%02d-%02d_.txt", 
 		sDate.Year,
 		sDate.Month,
 		sDate.Date,
 		sTime.Hours,
 		sTime.Minutes
 	);
+	
 	printf("%s\nFileName:%s\n", wtext, FileName);
 	if(f_mount(&SDFatFs, (TCHAR const*)SDPath, 0) == FR_OK){
 		PrintTime();
@@ -330,26 +467,25 @@ void WriteFile(){
 		PrintTime();
 		printf("[SD_FATFS_STAT] Mount Failed!\n");
 	}
-	
+	return ;
+
 }
 
-void PrintTime(){
+void PrintTime(void){
 	
 	printf("[20%02d-%02d-%02d %02d:%02d:%02d]",
-				sDate.Year,
-				sDate.Month,
-				sDate.Date,
-				sTime.Hours,
-				sTime.Minutes,
-				sTime.Seconds
+		sDate.Year,
+		sDate.Month,
+		sDate.Date,
+		sTime.Hours,
+		sTime.Minutes,
+		sTime.Seconds
 	);
 	return ;
+	
 }
 
-void CheckState(){
-	
-	LED0_on();
-	LED1_off();
+void CheckState(void){
 	
 	ListenCO2Sensor();
 	if(CheckCO2Sensor()){
@@ -359,14 +495,13 @@ void CheckState(){
 	}
 	
 	else{
+		LED0_off();
 		PrintTime();
 		printf("[CO2_SENSOR_STATE] Error!\n");
 	}
 	
 	/*PM SENSOR READ*/
 	HAL_Delay(100);
-	LED0_on();
-	LED0_off();
 	ListenPMSensor();
 	if(CheckPMSensor()){
 		PrintTime();
@@ -374,18 +509,36 @@ void CheckState(){
 		GetPMSensor();
 	}
 	else{
+		LED1_off();
 		PrintTime();
 		printf("[PM_SENSOR_STATE] Error!\n");
 	}
 	
 	PrintTime();
-	printf("\nCO2: %d ppm \nPM2.5: %d ug/m^3\nPM10: %d ug/m^3\n", CO2SensorResult, PMResult.PM2_5, PMResult.PM10);
-	WriteFile();
+	printf("\nTemp : %d.%d degree Celsius\nRH : %d.%d % \nCO2: %d ppm \nPM2.5: %d ug/m^3\nPM10: %d ug/m^3\n", 
+		temp_low,
+		temp_high,
+		rh_low,
+		rh_high,
+		CO2SensorResult,	
+		PMResult.PM2_5, 
+		PMResult.PM10
+	);
+	UpdateTemp();
+	LED0_on();
+	LED1_on();
+	HAL_Delay(100);
+	LED0_off();
+	LED1_off();
+	HAL_Delay(100);
+	LED0_on();
+	LED1_on();
 	//WriteFile(filename);
 	HAL_Delay(1000);
 	
 	return ;
- }
+	
+}
 
 /* USER CODE END 0 */
 
@@ -409,7 +562,7 @@ int main(void){
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
-
+	
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
@@ -420,14 +573,37 @@ int main(void){
   MX_FATFS_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
-
+	delay_init(168);
   /* USER CODE END 2 */
+	
+	HAL_Delay(1000 * 60);
 	
   while (1){
     
 		/* USER CODE BEGIN 3 */
-		
+		TOT++;
+		LED0_on();
+		LED1_on();
 		HAL_Delay(100);
+		LED0_off();
+		LED1_off();
+		HAL_Delay(100);
+		LED0_on();
+		LED1_on();
+		HAL_Delay(100);
+		LED0_off();
+		LED1_off();
+		HAL_Delay(100);
+		LED0_on();
+		LED1_on();
+		HAL_Delay(100);
+		LED0_off();
+		LED1_off();
+		HAL_Delay(100);
+		LED0_on();
+		LED1_on();
+		HAL_Delay(500);
+
 		HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 		HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 		if(second_tmp != sTime.Seconds){
@@ -444,14 +620,25 @@ int main(void){
 			);
 		}
 		
-		TOT++;
-		LED0_on();
-		LED1_on();
-		
 		CheckState();
+		if(TOT > 1) {
+			WriteFile();
+			LED0_on();
+			LED1_on();
+			HAL_Delay(100);
+			LED0_off();
+			LED1_off();
+			HAL_Delay(100);
+			LED0_on();
+			LED1_on();
+			HAL_Delay(100);
+			LED0_off();
+			LED1_off();
+			HAL_Delay(100);
+			HAL_Delay(1000 * 60);
+		}
+		//
 		
-		HAL_Delay(100);
-
   }
   /* USER CODE END 3 */
 }
